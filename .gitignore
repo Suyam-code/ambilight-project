@@ -1,0 +1,12 @@
+# Python
+python/venv/
+python/__pycache__/
+*.pyc
+
+# Local runtime files — not meant to be shared
+brightness.txt
+ambilight.log
+ambilight-error.log
+
+# Arduino build artifacts
+arduino/*/build/

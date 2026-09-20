@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.suyam.ambilight</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/suyamlodha/ambilight-project/python/venv/bin/python3</string>
+        <string>/Users/suyamlodha/ambilight-project/python/ambilight_capture.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/suyamlodha/ambilight-project/python</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/suyamlodha/ambilight-project/ambilight.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/suyamlodha/ambilight-project/ambilight-error.log</string>
+</dict>
+</plist>

@@ -1,0 +1,4 @@
+mss==10.2.0
+numpy==2.5.3
+pillow==12.3.0
+pyserial==3.5
