@@ -30,10 +30,6 @@ BAUD_RATE   = 115200        # must match Arduino Serial.begin()
 MONITOR_INDEX = 1           # mss monitor index (1 = primary monitor; check via mss().monitors)
 
 # --- LED layout: how many LEDs on each edge of the screen bezel ---
-# Order MUST match the physical order LEDs are wired in.
-# Default assumes: start bottom-left corner, go UP the left side, then
-# CLOCKWISE across top, down the right side, and across the bottom back
-# to the start. Adjust LEDS_* counts and EDGE_ORDER to match your build.
 LEDS_LEFT   = 10
 LEDS_TOP    = 20
 LEDS_RIGHT  = 10
@@ -49,8 +45,6 @@ SATURATION_BOOST = 1.35      # >1 makes colors punchier (edge pixels are often w
 GAMMA           = 1.0        # disabled — was over-brightening near-black pixels
 BLACK_THRESHOLD = 12         # any channel average below this gets forced to 0 (true black)
 
-# Per-channel calibration — tune if colors look unbalanced on your specific strip.
-# (R, G, B) multipliers applied after saturation boost. Start here, adjust by feel:
 CHANNEL_GAIN = (1.15, 1.0, 0.80)   # boosts red, slightly reduces blue
 
 BRIGHTNESS = 1.0             # master brightness, 0.0-1.0
@@ -68,58 +62,71 @@ def open_serial():
     return ser
 
 
-def build_zone_boxes(w, h):
-    """Return list of (x0,y0,x1,y1) pixel boxes, one per LED, in EDGE_ORDER."""
+def build_capture_regions(monitor):
+    """Return mss-compatible region dicts for just the 4 thin edge strips."""
+    w, h = monitor["width"], monitor["height"]
     depth_x = max(1, int(w * EDGE_DEPTH_FRAC))
     depth_y = max(1, int(h * EDGE_DEPTH_FRAC))
-    boxes = []
+    top    = {"left": monitor["left"], "top": monitor["top"], "width": w, "height": depth_y}
+    bottom = {"left": monitor["left"], "top": monitor["top"] + h - depth_y, "width": w, "height": depth_y}
+    left   = {"left": monitor["left"], "top": monitor["top"], "width": depth_x, "height": h}
+    right  = {"left": monitor["left"] + w - depth_x, "top": monitor["top"], "width": depth_x, "height": h}
+    return {"top": top, "bottom": bottom, "left": left, "right": right}
+
+
+def sample_colors_from_strips(top, bottom, left, right, w, h):
+    """
+    Mirrors the original build_zone_boxes()/sample_colors() traversal exactly,
+    but reads each LED's average color from a small cropped strip instead of
+    a full-frame array. top/bottom/left/right are BGR (alpha already dropped).
+    Channel reorder to RGB happens once at the end on the tiny NUM_LEDS x 3
+    array, which is far cheaper than reordering full-size frames.
+    """
+    depth_x = max(1, int(w * EDGE_DEPTH_FRAC))
+    depth_y = max(1, int(h * EDGE_DEPTH_FRAC))
 
     def split(a, b, n):
         pts = np.linspace(a, b, n + 1).astype(int)
         return list(zip(pts[:-1], pts[1:]))
 
+    colors = []
+
     for edge in EDGE_ORDER:
         if edge == "left_up":
             for y0, y1 in reversed(split(0, h, LEDS_LEFT)):
-                boxes.append((0, y0, depth_x, y1))
+                region = left[y0:max(y1, y0 + 1), 0:depth_x]
+                colors.append(region.reshape(-1, 3).mean(axis=0))
         elif edge == "top_right":
             for x0, x1 in split(0, w, LEDS_TOP):
-                boxes.append((x0, 0, x1, depth_y))
+                region = top[0:depth_y, x0:max(x1, x0 + 1)]
+                colors.append(region.reshape(-1, 3).mean(axis=0))
         elif edge == "right_down":
             for y0, y1 in split(0, h, LEDS_RIGHT):
-                boxes.append((w - depth_x, y0, w, y1))
+                region = right[y0:max(y1, y0 + 1), 0:depth_x]
+                colors.append(region.reshape(-1, 3).mean(axis=0))
         elif edge == "bottom_left":
             for x0, x1 in reversed(split(0, w, LEDS_BOTTOM)):
-                boxes.append((x0, h - depth_y, x1, h))
+                region = bottom[0:depth_y, x0:max(x1, x0 + 1)]
+                colors.append(region.reshape(-1, 3).mean(axis=0))
         else:
             raise ValueError(f"Unknown edge '{edge}' in EDGE_ORDER")
-    return boxes
 
-
-def sample_colors(img_array, boxes):
-    colors = np.zeros((len(boxes), 3), dtype=np.float32)
-    for i, (x0, y0, x1, y1) in enumerate(boxes):
-        region = img_array[y0:max(y1, y0 + 1), x0:max(x1, x0 + 1)]
-        colors[i] = region.reshape(-1, region.shape[-1])[:, :3].mean(axis=0)
+    colors = np.array(colors, dtype=np.float32)
+    colors = colors[:, [2, 1, 0]]   # BGR -> RGB, done once on 60 pixels not millions
     return colors
 
 
 def apply_style(colors):
-    # Black cutoff — kill near-zero pixels entirely instead of letting
-    # gamma/saturation brighten them into a dim glow
     brightness = colors.mean(axis=1, keepdims=True)
     black_mask = (brightness < BLACK_THRESHOLD).flatten()
 
-    # Saturation boost
     mean = colors.mean(axis=1, keepdims=True)
     colors = mean + (colors - mean) * SATURATION_BOOST
     colors = np.clip(colors, 0, 255)
 
-    # Gamma correction (only if GAMMA != 1.0)
     if GAMMA != 1.0:
         colors = 255.0 * (colors / 255.0) ** (1.0 / GAMMA)
 
-    # Per-channel calibration
     colors = colors * np.array(CHANNEL_GAIN)
 
     colors[black_mask] = 0
@@ -154,24 +161,24 @@ def main():
     sct = mss()
     monitor = sct.monitors[MONITOR_INDEX]
     w, h = monitor["width"], monitor["height"]
-    boxes = build_zone_boxes(w, h)
+    regions = build_capture_regions(monitor)
 
     prev_colors = np.zeros((NUM_LEDS, 3), dtype=np.float32)
     frame_interval = 1.0 / FPS_TARGET
-    frame_count = 0
 
-    print("Streaming... Ctrl+C to stop.")
+    print("Streaming (edge-strip capture)... Ctrl+C to stop.")
     try:
         while True:
             t0 = time.time()
 
-            raw = np.array(sct.grab(monitor))  # BGRA
-            frame = raw[:, :, [2, 1, 0]]       # -> RGB
+            top    = np.array(sct.grab(regions["top"]))[:, :, :3]
+            bottom = np.array(sct.grab(regions["bottom"]))[:, :, :3]
+            left   = np.array(sct.grab(regions["left"]))[:, :, :3]
+            right  = np.array(sct.grab(regions["right"]))[:, :, :3]
 
-            colors = sample_colors(frame, boxes)
+            colors = sample_colors_from_strips(top, bottom, left, right, w, h)
             colors = apply_style(colors)
 
-            # Exponential smoothing to reduce flicker
             colors = SMOOTHING * prev_colors + (1 - SMOOTHING) * colors
             prev_colors = colors
 
